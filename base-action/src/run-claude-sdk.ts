@@ -119,19 +119,30 @@ export async function runClaudeWithSdk(
   const isSuccess = resultMessage.subtype === "success";
   core.setOutput("conclusion", isSuccess ? "success" : "failure");
 
-  // Handle structured output
+  // Handle structured output - search all result messages, not just the last one.
+  // Background tasks (subagents) that complete after the main turn can produce
+  // a follow-up result without structured_output, overwriting the real one.
   if (hasJsonSchema) {
+    const structuredResult = [...messages]
+      .reverse()
+      .find(
+        (m) =>
+          m.type === "result" &&
+          "structured_output" in m &&
+          !!(m as SDKResultMessage).structured_output,
+      );
+
     if (
-      isSuccess &&
-      "structured_output" in resultMessage &&
-      resultMessage.structured_output
+      structuredResult &&
+      "structured_output" in structuredResult &&
+      structuredResult.structured_output
     ) {
       const structuredOutputJson = JSON.stringify(
-        resultMessage.structured_output,
+        structuredResult.structured_output,
       );
       core.setOutput("structured_output", structuredOutputJson);
       core.info(
-        `Set structured_output with ${Object.keys(resultMessage.structured_output as object).length} field(s)`,
+        `Set structured_output with ${Object.keys(structuredResult.structured_output as object).length} field(s)`,
       );
     } else {
       core.setFailed(
