@@ -205,16 +205,72 @@ export async function runClaudeWithSdk(
   const isSuccess = resultMessage.subtype === "success";
   result.conclusion = isSuccess ? "success" : "failure";
 
-  // Handle structured output
+  // Handle structured output - background tasks (subagents) that complete after
+  // the main turn can cause the structured_output to be lost in two ways:
+  // 1. A follow-up result message without structured_output overwrites the real one
+  // 2. The StructuredOutput tool is called in an intermediate turn, and subsequent
+  //    background-task turns produce a final result that never gets the field
   if (hasJsonSchema) {
+    let structuredOutput: object | undefined;
+
+    // Strategy 1: Search result messages (most recent first) for structured_output
+    const structuredResult = [...messages]
+      .reverse()
+      .find(
+        (m) =>
+          m.type === "result" &&
+          "structured_output" in m &&
+          !!(m as SDKResultMessage).structured_output,
+      );
+
     if (
-      isSuccess &&
-      "structured_output" in resultMessage &&
-      resultMessage.structured_output
+      structuredResult &&
+      "structured_output" in structuredResult &&
+      structuredResult.structured_output
     ) {
-      result.structuredOutput = JSON.stringify(resultMessage.structured_output);
+      structuredOutput = structuredResult.structured_output as object;
+    }
+
+    // Strategy 2: Fall back to extracting from StructuredOutput tool_use calls
+    // in assistant messages. This handles cases where the tool was called in an
+    // intermediate turn and background tasks caused additional turns afterward.
+    if (!structuredOutput) {
+      const toolUseMsg = [...messages].reverse().find((m) => {
+        if (m.type !== "assistant" || !("message" in m)) return false;
+        const msg = m as {
+          message?: { content?: Array<{ type: string; name?: string }> };
+        };
+        return msg.message?.content?.some(
+          (c) => c.type === "tool_use" && c.name === "StructuredOutput",
+        );
+      });
+
+      if (toolUseMsg && "message" in toolUseMsg) {
+        const msg = toolUseMsg as {
+          message: {
+            content: Array<{
+              type: string;
+              name?: string;
+              input?: Record<string, unknown>;
+            }>;
+          };
+        };
+        const toolUse = msg.message.content.find(
+          (c) => c.type === "tool_use" && c.name === "StructuredOutput",
+        );
+        if (toolUse?.input && typeof toolUse.input === "object") {
+          structuredOutput = toolUse.input;
+          core.info(
+            "Recovered structured_output from StructuredOutput tool call (background task race)",
+          );
+        }
+      }
+    }
+
+    if (structuredOutput) {
+      result.structuredOutput = JSON.stringify(structuredOutput);
       core.info(
-        `Set structured_output with ${Object.keys(resultMessage.structured_output as object).length} field(s)`,
+        `Set structured_output with ${Object.keys(structuredOutput).length} field(s)`,
       );
     } else {
       core.setFailed(
